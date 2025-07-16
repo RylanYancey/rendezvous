@@ -1,9 +1,13 @@
 use ratatui::crossterm;
 use tokio::{runtime::Runtime, sync::mpsc, task};
 
+use crate::startup::{StartupError, StartupEvent};
+
 pub enum Event {
     Crossterm(crossterm::event::Event),
     LogReceived(String),
+    Startup(StartupEvent),
+    StartupError(StartupError),
 }
 
 pub struct Events {
@@ -12,11 +16,22 @@ pub struct Events {
 }
 
 impl Events {
-    pub fn new(runtime: &Runtime) -> Self {
+    pub fn new() -> Self {
         let (tx, rx) = mpsc::channel(64);
-        let tx2 = tx.clone();
-        runtime.spawn_blocking(move || poll_crossterm(tx2));
         Self { rx, tx }
+    }
+
+    pub fn start_polling_crossterm(&self, runtime: &Runtime) {
+        let ev_tx = self.tx();
+        runtime.spawn_blocking(move || {
+            loop {
+                if let Ok(ev) = crossterm::event::read() {
+                    if ev_tx.blocking_send(Event::Crossterm(ev)).is_err() {
+                        break;
+                    }
+                }
+            }
+        });
     }
 
     /// Returns None when there are no more events to read.
@@ -27,15 +42,5 @@ impl Events {
     /// Get a transmitter for events.
     pub fn tx(&self) -> mpsc::Sender<Event> {
         self.tx.clone()
-    }
-}
-
-fn poll_crossterm(ev_tx: mpsc::Sender<Event>) {
-    loop {
-        if let Ok(ev) = crossterm::event::read() {
-            if ev_tx.blocking_send(Event::Crossterm(ev)).is_err() {
-                break;
-            }
-        }
     }
 }

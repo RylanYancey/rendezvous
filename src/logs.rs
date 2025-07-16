@@ -5,7 +5,7 @@ use tracing::level_filters::LevelFilter;
 use crate::event::Event;
 use super::*;
 use tokio::sync::mpsc;
-use tracing_subscriber::{fmt::{format::Writer, FmtContext, FormatEvent, MakeWriter}, layer::{Filter, SubscriberExt}, util::SubscriberInitExt, Layer};
+use tracing_subscriber::{fmt::{format::Writer, FmtContext, FormatEvent, MakeWriter}, layer::{Filter, SubscriberExt}, util::SubscriberInitExt, Layer, Registry};
 
 pub struct Logs {
     pub init_error: Option<String>,
@@ -81,12 +81,17 @@ impl Logs {
                 LogWriter {
                     ev_tx,
                     file: Arc::new(Mutex::new(logs_file)),
+                    buffer: Arc::new(Mutex::new(String::new()))
                 }
             );
-        tracing_subscriber::registry()
-            .with(LevelFilter::INFO)
-            .with(sub)
-            .init();
+
+        if let Err(e) = tracing::subscriber::set_global_default(
+            Registry::default()
+                .with(LevelFilter::INFO)
+                .with(sub)
+        ) {
+            return Self::err(format!("[E394] Failed to configure logger with error: '{e}'."));
+        }
 
         Self {
             init_error: None,
@@ -119,6 +124,7 @@ pub fn render_logs_box(frame: &mut Frame, state: &mut State, area: Rect) {
 struct LogWriter {
     ev_tx: mpsc::Sender<Event>,
     file: Arc<Mutex<fs::File>>,
+    buffer: Arc<Mutex<String>>,
 }
 
 impl<'a> MakeWriter<'a> for LogWriter {
@@ -133,15 +139,21 @@ impl io::Write for LogWriter {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         // write bytes to log file
         self.file.lock().write_all(&buf)?;
-        // convert to string and send to log context for display.
-        let len = buf.len();
-        match String::from_utf8(Vec::from(buf)) {
-            Err(_) => Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid UTF-8")),
-            Ok(s) => {
-                let _ = self.ev_tx.blocking_send(Event::LogReceived(s.to_string()));
-                Ok(len)
-            }
+
+        let s = match std::str::from_utf8(buf) {
+            Ok(s) => s,
+            Err(_) => return Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid UTF-8")),
+        };
+
+        let mut buffer = self.buffer.lock();
+        buffer.push_str(s);
+
+        while let Some(pos) = buffer.find('\n') {
+            let line = buffer.drain(..=pos).collect::<String>();
+            let _ = self.ev_tx.blocking_send(Event::LogReceived(line));
         }
+
+        Ok(buf.len())
     }
 
     fn flush(&mut self) -> io::Result<()> {
